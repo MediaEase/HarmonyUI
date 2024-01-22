@@ -101,29 +101,37 @@ calculate_new_version() {
   local minor=${version_components[1]}
   local patch=${version_components[2]}
 
-  local has_feature_commit=false
-  local has_breaking_commit=false
-  local has_other_commit=false
+  local feat_count=0
+  local fix_count=0
+  local bc_count=0
 
   while IFS= read -r line; do
-    if [[ "$line" =~ feat: ]]; then
-      has_feature_commit=true
-    elif [[ "$line" =~ breaking: ]]; then
-      has_breaking_commit=true
-    else
-      has_other_commit=true
-    fi
+    local commit_type
+    commit_type=$(echo "$line" | grep -oE '^[a-z]+(\([^)]+\))?:' | cut -d':' -f1 | sed -e 's/([^)]*)//g')
+
+    case $commit_type in
+      feat)
+        feat_count=$((feat_count + 1))
+        ;;
+      fix)
+        fix_count=$((fix_count + 1))
+        ;;
+      bc)
+        bc_count=$((bc_count + 1))
+        ;;
+      *)
+        fix_count=$((fix_count + 1))
+        ;;
+    esac
   done < <(get_commits "$full_last_tag")
 
-  if [[ "$has_breaking_commit" == "true" ]]; then
-    major=$((major + 1))
+  major=$((major + bc_count))
+  if [[ $bc_count -gt 0 ]]; then
     minor=0
     patch=0
-  elif [[ "$has_feature_commit" == "true" ]]; then
-    minor=$((minor + 1))
-    patch=0
-  elif [[ "$has_other_commit" == "true" ]]; then
-    patch=$((patch + 1))
+  else
+    minor=$((minor + feat_count))
+    patch=$((patch + fix_count))
   fi
 
   local new_version="v${major}.${minor}.${patch}"
@@ -194,16 +202,27 @@ generate_changelog() {
   # Initialize changelog string
   local changelog="# Changelog\n\n### This release contains the following changes:\n\n"
 
+  # Initialize all types in the sections array
+  declare -A sections
+  for key in "${!changelog_types[@]}"; do
+      sections[$key]=""
+  done
+
   # Get the list of commits since the last tag, with details
   local commits
   commits=$(git log "$last_tag"..HEAD --pretty=format:"%H %s %an")
 
   # Sort commits into sections based on their types
-  declare -A sections
   while IFS= read -r commit; do
     local hash type desc author
     hash=$(echo "$commit" | awk '{print $1}')
     type=$(echo "$commit" | awk '{print $2}' | sed -n 's/^\([^:]*\):.*/\1/p')
+    
+    # Validate and adjust the commit type
+    if [[ -z "$type" ]] || [[ -z "${changelog_types[$type]}" ]]; then
+        type="other"
+    fi
+
     desc=$(echo "$commit" | sed -e "s/^[^ ]* $type: //g" -e "s/ [^ ]*$//g")
     author=$(echo "$commit" | awk '{print $NF}')
     partial_hash=${hash:0:7}
